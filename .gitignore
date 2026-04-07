@@ -23,3 +23,5 @@ Thumbs.db
 # Translator outputs (keep translated html if you want to share samples)
 output/*_debug_processed.md
 output/image*.png
+
+.claude/

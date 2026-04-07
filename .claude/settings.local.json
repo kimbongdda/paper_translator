@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(ls \"c:\\\\Users\\\\User\\\\Desktop\\\\새 폴더 \\(2\\)/\")"
-    ]
-  }
-}
