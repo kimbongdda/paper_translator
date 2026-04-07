@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Secrets
+deepl_key.txt
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Build/cache
+.pytest_cache/
+.mypy_cache/
+
+# Translator outputs (keep translated html if you want to share samples)
+output/*_debug_processed.md
+output/image*.png

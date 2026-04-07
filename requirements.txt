@@ -1,0 +1,6 @@
+marker-pdf>=0.3.0
+deepl>=1.18.0
+deep-translator>=1.11.4
+Pillow>=10.0.0
+markdown>=3.5.0
+pymdown-extensions>=10.0
