@@ -17,6 +17,8 @@ import io
 import base64
 import time
 import os
+import json
+import hashlib
 from pathlib import Path
 
 import PIL.Image
@@ -171,6 +173,7 @@ class PaperTranslator:
             n = len(line)
             if n < 40:
                 return line
+            # 1) 행 처음부터 시작하는 반복
             for unit_len in range(4, min(61, n // 5 + 1)):
                 unit = line[:unit_len]
                 i, reps = 0, 0
@@ -179,6 +182,11 @@ class PaperTranslator:
                     i += unit_len
                 if reps >= 5:
                     return unit.rstrip()
+            # 2) 행 중간부터 시작하는 반복 (예: prefix + \mid \text{규정} × 수백 회)
+            m = re.search(r'(.{4,60}?)\1{4,}', line)
+            if m:
+                prefix = line[:m.start()]
+                return (prefix + m.group(1)).rstrip()
             return line
 
         lines = [collapse_line(l) for l in text.split('\n')]
@@ -269,12 +277,13 @@ class PaperTranslator:
         s = re.sub(r'\$\$[\s\S]*?\$\$', stash, s)           # 블록 수식 $$
         s = re.sub(r'\\\[[\s\S]*?\\\]', stash, s)            # 블록 수식 \[
         s = re.sub(r'```[\s\S]*?```', stash, s)              # 코드 펜스
+        # 표를 HTML 태그보다 먼저 stash: <br> 같은 태그가 표 셀 안에 있어도 표와 함께 보존됨
+        s = re.sub(r'(?m)^[ \t]*(\|[^\n]+\n){2,}', stash, s)  # 표 (행 앞 공백 허용, 최소 2행)
         s = re.sub(
             r'<\/?(?:sup|sub|span|em|strong|b|i|br|figure|figcaption|code|pre|table|thead|tbody|tr|th|td|a|img|p|div|section|article|header|footer|ul|ol|li|math|mrow|mi|mo|mn|msup|msub|h[1-6])(?:\s+[^>]*)?>',
             stash,
             s,
         )  # 원시 HTML 태그
-        s = re.sub(r'(?m)^(\|[^\n]+\n)+', stash, s)          # 표
         # \(...\) stash 제거: marker는 $...$로 수식 출력, \(는 Fig.\(a), abbr 등에 오인식됨
 
         # 단락 단위로 번역 — 토큰은 절대 번역기로 보내지 않음
@@ -287,16 +296,27 @@ class PaperTranslator:
         def flush_text_buf():
             if not text_buf:
                 return
-            combined = '\n\n'.join(text_buf)
+            paras_snap = list(text_buf)
             text_buf.clear()
             _translated_count[0] += 1
             if _translated_count[0] % 5 == 0:
-                print(f"  [{_translated_count[0]}/{total_paras}] 번역 중... ({len(combined)}자)")
+                print(f"  [{_translated_count[0]}/{total_paras}] 번역 중...")
+
+            combined = '\n\n'.join(paras_snap)
             translated = self._call_translate(combined, src, tgt) if combined.strip() else combined
-            # 번역 실패 감지: 한국어가 0%면 경고
-            if combined.strip() and translated == combined:
-                print(f"  [미번역] {combined[:80]!r}")
-            result_paras.append(translated)
+
+            # 배치 전체 실패 → 단락별 개별 재시도
+            if combined.strip() and translated == combined and len(paras_snap) > 1:
+                print(f"  [배치 실패] {len(paras_snap)}개 단락 개별 재시도...")
+                translated_parts = []
+                for p in paras_snap:
+                    r = self._call_translate(p, src, tgt) if p.strip() else p
+                    if r == p and p.strip():
+                        print(f"  [미번역] {p[:60]!r}")
+                    translated_parts.append(r)
+                result_paras.append('\n\n'.join(translated_parts))
+            else:
+                result_paras.append(translated)
 
         for para in paragraphs:
             real = self._STASH_RE.sub('', para).strip()
@@ -377,9 +397,71 @@ class PaperTranslator:
                 result.append(f"\x00ST{ids[i]}ST\x00")
         return ''.join(result)
 
+    # ─────────────────────────────────────────
+    # 번역 캐시 (디스크 저장 — 쿼터 소진 후 재실행 시 API 호출 없이 재사용)
+    # ─────────────────────────────────────────
+    def _cache_key(self, text: str, src: str, tgt: str) -> str:
+        return hashlib.sha256(f"{src}|{tgt}|{text}".encode()).hexdigest()
+
+    def _cache_get(self, key: str) -> str | None:
+        cache = getattr(self, '_trans_cache', {})
+        return cache.get(key)
+
+    def _cache_set(self, key: str, value: str) -> None:
+        if not hasattr(self, '_trans_cache'):
+            self._trans_cache = {}
+        self._trans_cache[key] = value
+        # 50건마다 디스크에 저장
+        self._cache_dirty = getattr(self, '_cache_dirty', 0) + 1
+        if self._cache_dirty % 50 == 0:
+            self._save_cache()
+
+    def _translation_needs_retry(self, source_text: str, translated_text: str, src: str, tgt: str) -> bool:
+        if not translated_text or translated_text == source_text:
+            return True
+
+        if src == 'en' and tgt == 'ko':
+            source_markers = len(re.findall(r'[A-Za-z]', source_text))
+            translated_hangul = len(re.findall(r'[가-힣]', translated_text))
+            translated_latin = len(re.findall(r'[A-Za-z]', translated_text))
+            if source_markers >= 20 and translated_hangul < max(12, int(source_markers * 0.12)) and translated_latin > max(24, int(source_markers * 0.55)):
+                return True
+        elif src == 'ko' and tgt == 'en':
+            source_markers = len(re.findall(r'[가-힣]', source_text))
+            translated_hangul = len(re.findall(r'[가-힣]', translated_text))
+            translated_latin = len(re.findall(r'[A-Za-z]', translated_text))
+            if source_markers >= 12 and translated_latin < max(24, int(source_markers * 0.12)) and translated_hangul > max(12, int(source_markers * 0.55)):
+                return True
+
+        return False
+
+    def _load_cache(self, pdf_stem: str) -> None:
+        self._cache_path = OUTPUT_DIR / f"{pdf_stem}_trans_cache.json"
+        if self._cache_path.exists():
+            try:
+                self._trans_cache = json.loads(self._cache_path.read_text(encoding='utf-8'))
+                print(f"  [캐시] {len(self._trans_cache)}개 항목 로드: {self._cache_path.name}")
+            except Exception:
+                self._trans_cache = {}
+        else:
+            self._trans_cache = {}
+        self._cache_dirty = 0
+
+    def _save_cache(self) -> None:
+        cache_path = getattr(self, '_cache_path', None)
+        if cache_path and hasattr(self, '_trans_cache'):
+            cache_path.write_text(json.dumps(self._trans_cache, ensure_ascii=False), encoding='utf-8')
+
     def _call_translate(self, text: str, src: str, tgt: str) -> str:
         if not text.strip():
             return text
+
+        # 캐시 확인
+        key = self._cache_key(text, src, tgt)
+        cached = self._cache_get(key)
+        if cached is not None:
+            return cached
+
         fast_mode = getattr(self, '_fast_mode', False)
 
         def is_bad_translation(x: str) -> bool:
@@ -396,12 +478,17 @@ class PaperTranslator:
             try:
                 result = self._deepl_translator.translate_text(
                     text, source_lang=src.upper(), target_lang=tgt.upper())
-                return result.text if result else text
+                translated = result.text if result else text
+                if translated and translated != text:
+                    if not self._translation_needs_retry(text, translated, src, tgt):
+                        self._cache_set(key, translated)
+                        return translated
+                    print("  [DeepL] 번역 결과가 원문과 유사하여 Google Translate로 재시도합니다")
             except Exception as e:
                 err_str = str(e)
                 if 'Quota' in err_str or 'quota' in err_str or '456' in err_str:
                     print("  [DeepL] 월 한도 초과 - Google Translate로 전환합니다")
-                    self._deepl_ok = False  # 이후 호출은 바로 Google로
+                    self._deepl_ok = False
                 else:
                     print(f"  [DeepL 오류] {err_str[:100]}")
 
@@ -469,13 +556,17 @@ class PaperTranslator:
         for attempt in range(max_attempts):
             try:
                 result = google_translator.translate(text)
-                if result is not None and result != text and not is_bad_translation(result):
+                if result is not None and result != text and not is_bad_translation(result) and not self._translation_needs_retry(text, result, src, tgt):
+                    self._cache_set(key, result)
+                    time.sleep(1.2 if not fast_mode else 0.5)  # 속도 제한 방지
                     return result
 
                 # 긴 문단이 그대로 반환되면 문장 단위로 쪼개서 재시도
                 if len(text) > 300 and re.search(r'[A-Za-z]{4,}', text):
                     joined = translate_long_text_with_fallback(text)
-                    if joined and joined != text and not is_bad_translation(joined):
+                    if joined and joined != text and not is_bad_translation(joined) and not self._translation_needs_retry(text, joined, src, tgt):
+                        self._cache_set(key, joined)
+                        time.sleep(1.2 if not fast_mode else 0.5)
                         return joined
 
                 return result if result is not None else text
@@ -501,6 +592,7 @@ class PaperTranslator:
         if len(text) > 300 and re.search(r'[A-Za-z]{4,}', text):
             joined = translate_long_text_with_fallback(text)
             if joined and joined != text and not is_bad_translation(joined):
+                self._cache_set(key, joined)
                 return joined
         return text
 
@@ -600,6 +692,13 @@ class PaperTranslator:
             # 중괄호 delimiter는 \{ / \} 형태여야 MathJax가 인식한다.
             math_text = re.sub(r'\\left\s*\{', r'\\left\\{', math_text)
             math_text = re.sub(r'\\right\s*\}', r'\\right\\}', math_text)
+            # \left / \right 짝 맞추기 (불일치 시 MathJax 오류 방지)
+            n_left  = len(re.findall(r'\\left(?![a-zA-Z])', math_text))
+            n_right = len(re.findall(r'\\right(?![a-zA-Z])', math_text))
+            if n_right > n_left:
+                math_text = r'\left. ' * (n_right - n_left) + math_text
+            elif n_left > n_right:
+                math_text = math_text + r' \right.' * (n_left - n_right)
             # 케이스 블록에서 자주 생기는 중복/마침표 아티팩트 정리
             math_text = re.sub(
                 r'(\\k\s*=\s*1,\s*\\dots,\s*K,\s*)\\k\s*=\s*1,\s*\\dots,\s*K,\s*',
@@ -640,10 +739,43 @@ class PaperTranslator:
         # 번역기가 훼손한 [MQ0] 마커 잔여 제거
         md = re.sub(r'\[MQ\d+\]', '', md)
 
+        # ── 표 수정 ──────────────────────────────────────────────────────────
+        # marker가 표 구분선을 절반만 출력하는 경우 헤더 기준으로 재구성
+        # 예: | a | b | c |\n|---|---\n → |---|---|---|\n
+        # <br>도 공백으로 변환
+        def fix_table_block(block: str) -> str:
+            lines = block.rstrip('\n').split('\n')
+            result = []
+            for i, line in enumerate(lines):
+                stripped = line.rstrip()
+                # 구분선 행 감지: |---|--, |:---:| 등
+                if i > 0 and re.match(r'^\s*\|[-|: ]+$', stripped):
+                    header = lines[i - 1]
+                    header_cols = header.count('|') - 1
+                    sep_cols = stripped.count('|') - 1
+                    if header_cols >= 1 and sep_cols < header_cols:
+                        result.append('|' + '---|' * header_cols)
+                        continue
+                    if not stripped.endswith('|'):
+                        result.append(stripped + '|')
+                        continue
+                # 셀 내 <br> → 공백
+                result.append(re.sub(r'<br\s*/?>', ' ', line))
+            return '\n'.join(result) + '\n'
+        md = re.sub(r'(?m)^(\|[^\n]+\n){2,}', lambda m: fix_table_block(m.group(0)), md)
+
         # MDPI/marker 계열에서 자주 남는 마크다운 이스케이프 정리
         # 수식은 이미 보호된 뒤라, 일반 텍스트의 escaped 괄호/언더스코어를 복원해도 안전하다.
-        md = re.sub(r'\\([()\[\]{}_%#&*])', r'\1', md)
+        # # 은 수식 내부에서 LaTeX 파라미터 문자로 오인되므로 제거 대상에서 제외
+        md = re.sub(r'\\([()\[\]{}_%&*])', r'\1', md)
         md = normalize_math_segments(md)
+        # 수식 블록 안에 남은 # 제거 (MathJax "macro parameter character #" 오류 방지)
+        def strip_hash_in_math(m):
+            return m.group(0).replace('#', '')
+        md = re.sub(r'\$\$[\s\S]*?\$\$', strip_hash_in_math, md)
+        md = re.sub(r'\$[^\n$]{1,500}\$', strip_hash_in_math, md)
+        md = re.sub(r'\\\[[\s\S]*?\\\]', strip_hash_in_math, md)
+        md = re.sub(r'\\\([^\n]{1,300}\\\)', strip_hash_in_math, md)
         md = self._normalize_math_wrappers(md)
 
         # 과도한 괄호로 남은 수식 토큰을 인라인 수식으로 정규화
@@ -750,6 +882,8 @@ class PaperTranslator:
 
         import deepl as _deepl
         self._deepl_translator = _deepl.Translator(_load_deepl_key())
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        self._load_cache(input_path.stem)
 
         print(f"[PDF] {input_path.name}")
         print("[1/4] marker 모델 로드 중... (처음 실행 시 모델 자동 다운로드, 수 분 소요)")
@@ -798,7 +932,11 @@ class PaperTranslator:
             r'\1',
             body_html,
         )
-        self._write_html(body_html, str(output_html))
+        # 번역된 마크다운에서 첫 번째 # 제목 추출 → HTML <title>
+        title_match = re.search(r'^#\s+(.+)', translated_md, re.MULTILINE)
+        page_title = title_match.group(1).strip() if title_match else input_path.stem
+        self._write_html(body_html, str(output_html), title=page_title)
+        self._save_cache()  # 최종 캐시 저장
         print(f"  HTML 생성 시간: {time.perf_counter() - t_html:.1f}초")
         print(f"  총 소요 시간: {time.perf_counter() - t0:.1f}초")
         print(f"[완료] {output_html}")
@@ -806,13 +944,13 @@ class PaperTranslator:
     # ─────────────────────────────────────────
     # HTML 템플릿
     # ─────────────────────────────────────────
-    def _write_html(self, body_html: str, output_path: str) -> None:
+    def _write_html(self, body_html: str, output_path: str, title: str = '논문 번역') -> None:
         html = f"""<!doctype html>
 <html lang="ko">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>논문 번역</title>
+<title>{title}</title>
 <script>
 MathJax = {{
   tex: {{
