@@ -274,11 +274,12 @@ class PaperTranslator:
             return token
 
         s = text
-        s = re.sub(r'\$\$[\s\S]*?\$\$', stash, s)           # 블록 수식 $$
-        s = re.sub(r'\\\[[\s\S]*?\\\]', stash, s)            # 블록 수식 \[
-        s = re.sub(r'```[\s\S]*?```', stash, s)              # 코드 펜스
+        s = re.sub(r'\$\$[\s\S]*?\$\$', stash, s)                         # 블록 수식 $$
+        s = re.sub(r'\\\[[\s\S]*?\\\]', stash, s)                          # 블록 수식 \[
+        s = re.sub(r'(?<!\$)\$([^\n$]{1,400}?)\$(?!\$)', stash, s)         # 인라인 수식 $
+        s = re.sub(r'```[\s\S]*?```', stash, s)                            # 코드 펜스
         # 표를 HTML 태그보다 먼저 stash: <br> 같은 태그가 표 셀 안에 있어도 표와 함께 보존됨
-        s = re.sub(r'(?m)^[ \t]*(\|[^\n]+\n){2,}', stash, s)  # 표 (행 앞 공백 허용, 최소 2행)
+        s = re.sub(r'(?m)^[ \t]*(\|[^\n]+\n){2,}', stash, s)              # 표 (행 앞 공백 허용, 최소 2행)
         s = re.sub(
             r'<\/?(?:sup|sub|span|em|strong|b|i|br|figure|figcaption|code|pre|table|thead|tbody|tr|th|td|a|img|p|div|section|article|header|footer|ul|ol|li|math|mrow|mi|mo|mn|msup|msub|h[1-6])(?:\s+[^>]*)?>',
             stash,
@@ -828,7 +829,8 @@ class PaperTranslator:
         token_idx = [0]
 
         def stash_math(html: str) -> str:
-            token = f"\x00MATH{token_idx[0]}MATH\x00"
+            # \x00 는 python-markdown이 제거하므로 HTML 주석 형태 사용
+            token = f"<!--MTOKEN{token_idx[0]}-->"
             math_vault[token] = html
             token_idx[0] += 1
             return token
@@ -852,7 +854,7 @@ class PaperTranslator:
         protected = re.sub(r'(?<!\\)\$\$([\s\S]*?)\$\$', stash_display, protected)
         protected = re.sub(r'(?<!\\)\\\[([\s\S]*?)\\\]', stash_display, protected)
         protected = re.sub(r'(?<!\\)\\\(([^\n]*?)\\\)', stash_inline_paren, protected)
-        protected = re.sub(r'(?<!\\)\$(?!\$)([\s\S]{1,1000}?)\$(?!\$)', stash_inline_dollar, protected)
+        protected = re.sub(r'(?<!\$)\$(?!\$)([^\n$]{1,400}?)\$(?!\$)', stash_inline_dollar, protected)
 
         try:
             html = md_lib.markdown(protected, extensions=['fenced_code', 'tables'])
