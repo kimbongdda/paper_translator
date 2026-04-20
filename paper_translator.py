@@ -418,22 +418,10 @@ class PaperTranslator:
             self._save_cache()
 
     def _translation_needs_retry(self, source_text: str, translated_text: str, src: str, tgt: str) -> bool:
+        # 결과가 없거나 원문과 완전히 동일할 때만 재시도
+        # 기술 논문은 번역 후에도 영문 전문용어가 많이 남으므로 비율 검사 제거
         if not translated_text or translated_text == source_text:
             return True
-
-        if src == 'en' and tgt == 'ko':
-            source_markers = len(re.findall(r'[A-Za-z]', source_text))
-            translated_hangul = len(re.findall(r'[가-힣]', translated_text))
-            translated_latin = len(re.findall(r'[A-Za-z]', translated_text))
-            if source_markers >= 20 and translated_hangul < max(12, int(source_markers * 0.12)) and translated_latin > max(24, int(source_markers * 0.55)):
-                return True
-        elif src == 'ko' and tgt == 'en':
-            source_markers = len(re.findall(r'[가-힣]', source_text))
-            translated_hangul = len(re.findall(r'[가-힣]', translated_text))
-            translated_latin = len(re.findall(r'[A-Za-z]', translated_text))
-            if source_markers >= 12 and translated_latin < max(24, int(source_markers * 0.12)) and translated_hangul > max(12, int(source_markers * 0.55)):
-                return True
-
         return False
 
     def _load_cache(self, pdf_stem: str) -> None:
