@@ -681,6 +681,10 @@ class PaperTranslator:
             # 중괄호 delimiter는 \{ / \} 형태여야 MathJax가 인식한다.
             math_text = re.sub(r'\\left\s*\{', r'\\left\\{', math_text)
             math_text = re.sub(r'\\right\s*\}', r'\\right\\}', math_text)
+            # \left\frac 처럼 delimiter 자리에 명령어가 오는 OCR 오류 수정
+            _vd = r'lfloor|rfloor|lceil|rceil|langle|rangle|[UuDd]parrow|vert|Vert'
+            math_text = re.sub(rf'\\left\s*(?=\\(?!{_vd})[a-zA-Z])', r'\\left(', math_text)
+            math_text = re.sub(rf'\\right\s*(?=\\(?!{_vd})[a-zA-Z])', r'\\right)', math_text)
             # \left / \right 짝 맞추기 (불일치 시 MathJax 오류 방지)
             n_left  = len(re.findall(r'\\left(?![a-zA-Z])', math_text))
             n_right = len(re.findall(r'\\right(?![a-zA-Z])', math_text))
